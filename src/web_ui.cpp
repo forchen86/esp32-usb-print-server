@@ -135,8 +135,7 @@ footer{text-align:center;color:var(--muted);font-size:11px;margin-top:22px;line-
       <div><span class="k">品牌</span><span class="v" id="p_make">-</span></div>
       <div class="wide"><span class="k">型号</span><span class="v" id="p_model">-</span></div>
       <div class="wide"><span class="k">完整型号</span><span class="v" id="p_des">-</span></div>
-      <div class="wide"><span class="k">电脑上显示的名字</span><span class="v mono" id="p_name">-</span></div>
-      <div class="wide"><span class="k">序列号</span><span class="v mono" id="p_serial">-</span></div>
+      <div class="wide" id="p_serial_row" style="display:none"><span class="k">序列号</span><span class="v mono" id="p_serial">-</span></div>
       <div><span class="k">USB 编号</span><span class="v mono" id="p_vid">-</span></div>
       <div><span class="k">USB 接口</span><span class="v" id="p_iface">-</span></div>
       <div><span class="k">数据通道</span><span class="v mono" id="p_ep">-</span></div>
@@ -269,7 +268,8 @@ async function status(){
   $('idstate').textContent=pr.ready?(pr.guessed?'没读到身份信息，按 USB 编号推断':'已自动识别'):'识别中…';
   $('p_make').textContent=pr.make||'-';$('p_model').textContent=pr.model||'-';
   $('p_des').textContent=pr.description||'-';
-  $('p_name').textContent=pr.name||'-';$('p_serial').textContent=pr.serial||'-';
+  $('p_serial_row').style.display=pr.serial?'':'none';
+  if(pr.serial)$('p_serial').textContent=pr.serial;
   $('p_vid').textContent=u.vid_pid||'-';$('p_iface').textContent=u.iface||'-';$('p_ep').textContent=u.out_ep||'-';
   $('p_paper').textContent=!u.connected?'-':(u.paper_empty?'缺纸':'正常');
   $('p_paper').className='v '+(u.paper_empty?'bad':(u.connected?'ok':''));

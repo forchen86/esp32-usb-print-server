@@ -253,18 +253,25 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
   size_t  probeLen = 0;
   int     sigDecision = 0;          // 0 = 未决, 1 = 认出, -1 = 拒绝
   auto sigCheck = [&]() -> int {
-    const uint8_t *d = probeBuf;
-    const size_t n = probeLen;
-    if (n >= 1 && d[0] == 0x1b) return 1;                       // UEL/PJL/PCL5/ESC-POS/HP-GL
+    const uint8_t *d0 = probeBuf;
+    size_t n0 = probeLen;
+    // 某些驱动/打印后台会在 UEL 前垫 NUL（0x00 对齐）：跳过开头最多 64 个
+    // NUL 再判，否则合法作业会被误拒。全 NUL 时继续等更多数据。
+    size_t off = 0;
+    while (off < n0 && off < 64 && d0[off] == 0x00) ++off;
+    const uint8_t *d = d0 + off;
+    const size_t n = n0 - off;
+    if (n == 0) return 0;                                       // 还全是 NUL：继续探
+    if (d[0] == 0x1b) return 1;                                 // UEL/PJL/PCL5/ESC-POS/HP-GL
     if (n >= 2 && d[0] == ')' && d[1] == '}') return 1;         // PCLXL 裸流
     if (n >= 2 && d[0] == '%' && d[1] == '!') return 1;         // PostScript
-    if (n >= 1 && d[0] == '^') return 1;                        // ZPL / TSPL
+    if (d[0] == '^') return 1;                                  // ZPL / TSPL
     if (n >= 4 && !memcmp(d, "RaS2", 4)) return 1;              // PWG raster
     if (n >= 7 && !memcmp(d, "UNIRAST", 7)) return 1;           // URF raster
     if (n >= 5 && !memcmp(d, "%PDF-", 5)) return 1;             // PDF / PCLm
     if (n >= 2 && d[0] == 0xFF && d[1] == 0xD8) return 1;       // JPEG
     if (n >= 4 && !memcmp(d, "\x89PNG", 4)) return 1;           // PNG
-    return (n >= PDL_PROBE_BYTES) ? -1 : 0;                     // 还有希望，继续探
+    return (n0 >= PDL_PROBE_BYTES) ? -1 : 0;                    // 还有希望，继续探
   };
 
   setFlag(s_busy, true);
