@@ -365,3 +365,5 @@ HP、LaserJet 是 HP Inc. 的商标；AirPrint、macOS、iOS 是 Apple Inc. 的�
 ### 许可
 
 代码以 **MIT License** 发布，见 [LICENSE](LICENSE)。固件按「尽力而为」提供，因打印质量、纸张、硬件差异造成的损失不承担责任。
+
+仓库分发的固件二进制包含第三方组件（Arduino-ESP32 / ESP-IDF / lwIP / FreeRTOS）的编译产物，其许可证与 LGPL 重新链接说明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
