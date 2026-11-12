@@ -10,8 +10,6 @@
 
 把**任意符合 USB Printer Class 的打印机**变成 **9100 RAW + IPP 631 双通路**网络打印机。固件只拆协议封装、把文档数据流式送进打印机接口的 Bulk OUT 端点：不解析、不渲染、**不做任何格式转换**、不落盘，只用一块 256 KB 环形缓冲做收发解耦。
 
-**v1.4.0 起不再绑定具体机型**：上电后通过 USB Printer Class 的 `GET_DEVICE_ID` 控制请求读取 IEEE 1284 Device ID（`MFG / MDL / CMD / DES / SN`），自动识别厂商、型号、命令集；IPP 的 `printer-name / make-and-model / device-id / document-format-supported / color-supported / urf-supported`、Bonjour TXT 的 `ty / product / pdl / URF / color`、SNMP 的 `sysDescr / prtGeneralPrinterName`、以及 Web 页标题全部由识别结果动态生成。**v1.4.2 起对外发布的型号优先取 `DES`**：HP 的 `MDL` 常是系列名（实测 `HP LaserJet M203-M206`），`DES` 才是具体销售型号（`HP LaserJet M203d`）；原始 MDL 仍保留在 Web 身份卡里。读不到 Device ID 时回退到 `VID:PID`，能力使用保守默认值并在页面上标注「能力为推定值」。
-
 ```
    电脑 / 手机                     ESP32-S3                       USB 打印机
  ┌──────────────┐   Wi-Fi    ┌──────────────────┐   USB OTG   ┌──────────────┐
