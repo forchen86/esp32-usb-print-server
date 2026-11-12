@@ -1,0 +1,28 @@
+# ---- PlatformIO / 构建中间产物 ----
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+*.map
+*.elf
+
+# ---- 工作区私有数据（会话、记忆、剪贴板引用）----
+.workbuddy/
+.dummy
+
+# ---- 本地日志与临时文件 ----
+*.log
+*.tmp
+boot142.log
+
+# ---- 编辑器 ----
+.idea/
+*.swp
+*~
+
+# ---- 旧版本归档，不发布 ----
+firmware/legacy-*/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.pyc
