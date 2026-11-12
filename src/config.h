@@ -8,7 +8,7 @@
 // 日志分级（FWLOGD / FWLOGI / FWLOGE）——所有 .cpp 都包含本头文件，统一在此引入
 #include "log.h"
 
-#define FW_VERSION              "1.5.0"   // 双版本固件：release 去除观测点 / debug 全量日志
+#define FW_VERSION              "1.5.1"   // 双版本固件：release 去除观测点 / debug 全量日志
 #define FW_HOSTNAME             "printserver"   // mDNS: http://printserver.local
 
 // --- AP 直连热点（配网完成后自动关闭，掉线 3 分钟重开）----------------------
@@ -72,6 +72,15 @@
 // 吐出一张空白页。客户端驱动自己生成的流末尾通常已带 UEL，重复一个幂等无害。
 // 设 0 可完全关闭尾部注入。
 #define JOB_TAIL_UEL            1
+
+// --- 打印语言签名门卫 --------------------------------------------------------
+// 作业开头的 1KB 必须能认出一种已知打印语言（PJL/UEL、PCL5/ESC、PCLXL、
+// PostScript、ZPL、PDF、URF、PWG、JPEG、PNG），认不出来 = 大概率是局域网里
+// 其它设备发来的垃圾数据（「偶发乱码白纸」的最常见来源），直接拒绝、
+// 一个字节都不上 USB。注意：纯文本作业没有打印语言签名，也会被拒；
+// 需要打印纯文本请走驱动。设 0 关闭门卫。
+#define PDL_SIGNATURE_GATE      1
+#define PDL_PROBE_BYTES         1024
 
 // --- 环形缓冲（小缓存 + 双水位背压）-----------------------------------------
 // 不再整包缓存：4 个固定 64KB 块组成 256KB 环，覆盖「一次 USB 传输的突发」即可。

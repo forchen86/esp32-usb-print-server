@@ -24,6 +24,7 @@ volatile bool  s_abortDone  = false;   // 本轮作业是否已经做过 USB abo
 unsigned       s_submitStreak = 0;     // USB 连续提交失败计数（只在 writer 里用）
 size_t         s_inflight = 0;         // 已提交给 USB、尚未 commit 的字节数（只在 writer 里用）
 volatile bool  s_abortReq = false;     // Web 侧的中止请求
+char           s_curSrc[16] = "";      // 当前作业来源 IP（accept 时由通路设置）
 
 bool flag(volatile bool &f) {
   portENTER_CRITICAL(&s_mux);
@@ -48,6 +49,25 @@ void setMsg(const char *s) {
 void wakeWriter() {
   if (s_writerTask) xTaskNotifyGive(s_writerTask);
 }
+
+// ---- 内容完整性校验（Adler-32）---------------------------------------------
+// 生产者对「从 socket 收到的字节」算一份，消费者对「送进 USB 的字节」算一份。
+// 作业结束时打印两份对比：数量校验抓不住的「内容损坏」（错位/丢失/重复），
+// 这里一定抓得住 —— 乱码白纸这类症状必须先排除传输层。
+struct Adler32 {
+  uint32_t a = 1, b = 0;
+  void update(const uint8_t *p, size_t n) {
+    while (n) {
+      size_t chunk = n > 5550 ? 5550 : n;   // 5550×255 < 2^32，一段一取模
+      n -= chunk;
+      while (chunk--) { a += *p++; b += a; }
+      a %= 65521; b %= 65521;
+    }
+  }
+  uint32_t value() const { return (b << 16) | a; }
+};
+Adler32 s_crcIn, s_crcOut;
+uint32_t s_crcInBytes = 0, s_crcOutBytes = 0;
 
 // spool 只能由消费者在「不在 usbPrinterWrite 内」的安全点清空。
 // 生产者通过请求/应答握手等待，彻底消除 reset 与 in-flight 搬运重叠。
@@ -119,6 +139,8 @@ void spoolWriterTask(void *) {
       const size_t n = spoolReadAcquireFrom(s_inflight, USB_XFER_SIZE, &p);
       if (!n) break;
       if (!usbPrinterSubmit(p, n)) { submitFailed = true; break; }
+      s_crcOut.update(p, n);                 // 内容校验：送出去什么算什么
+      s_crcOutBytes += (uint32_t)n;
       s_inflight += n;
     }
     if (submitFailed) {
@@ -188,6 +210,8 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
   }
 
   requestSpoolReset();               // 作业开始：清 spool
+  s_crcIn = Adler32{};  s_crcOut = Adler32{};
+  s_crcInBytes = s_crcOutBytes = 0;
   s_abortDone = false;
   setFlag(s_jobEof, false);
   setFlag(s_jobDrained, false);
@@ -202,6 +226,7 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
   bool ok = true;
   const char *why = "";
   bool eofNotified = false;
+  bool suppressEof = false;    // 门卫拒绝时置位：绝不回「接收成功」
   s_abortReq = false;
 
   // 文档数据一旦收齐就立刻通知传输层回「成功」，此时 USB 可能还在慢慢吐数据。
@@ -212,10 +237,34 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
   // 而纸上一片空白。这种情况保持 replied=false，由上层回错误码（重发是安全的）。
   auto markEof = [&]() {
     setFlag(s_jobEof, true);
-    if (!eofNotified && (ok || total > 0)) {
+    if (!eofNotified && !suppressEof && (ok || total > 0)) {
       eofNotified = true;
       if (onEof) onEof(eofCtx);
     }
+  };
+
+  // ---- 打印语言签名门卫 ------------------------------------------------------
+  // 前 PDL_PROBE_BYTES 字节必须能认出一种打印语言。认不出 = 别的设备发来的
+  // 垃圾数据，拒绝、不上 USB。探针阶段直接从数据源读进本地缓冲（不进 ring，
+  // 避免「未提交数据被二次 acquire 覆盖」），认出后一次性写入 ring 再恢复
+  // 零拷贝直写。suppressEof：被门卫拒绝的作业绝不回「接收成功」，
+  // 否则客户端会以为打完了（IPP 场景尤其重要）。
+  uint8_t probeBuf[PDL_PROBE_BYTES];
+  size_t  probeLen = 0;
+  int     sigDecision = 0;          // 0 = 未决, 1 = 认出, -1 = 拒绝
+  auto sigCheck = [&]() -> int {
+    const uint8_t *d = probeBuf;
+    const size_t n = probeLen;
+    if (n >= 1 && d[0] == 0x1b) return 1;                       // UEL/PJL/PCL5/ESC-POS/HP-GL
+    if (n >= 2 && d[0] == ')' && d[1] == '}') return 1;         // PCLXL 裸流
+    if (n >= 2 && d[0] == '%' && d[1] == '!') return 1;         // PostScript
+    if (n >= 1 && d[0] == '^') return 1;                        // ZPL / TSPL
+    if (n >= 4 && !memcmp(d, "RaS2", 4)) return 1;              // PWG raster
+    if (n >= 7 && !memcmp(d, "UNIRAST", 7)) return 1;           // URF raster
+    if (n >= 5 && !memcmp(d, "%PDF-", 5)) return 1;             // PDF / PCLm
+    if (n >= 2 && d[0] == 0xFF && d[1] == 0xD8) return 1;       // JPEG
+    if (n >= 4 && !memcmp(d, "\x89PNG", 4)) return 1;           // PNG
+    return (n >= PDL_PROBE_BYTES) ? -1 : 0;                     // 还有希望，继续探
   };
 
   setFlag(s_busy, true);
@@ -258,11 +307,59 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
 
     bool gotData = false;
     if (!flag(s_jobEof) && canRecv) {
+      if (PDL_SIGNATURE_GATE && sigDecision == 0) {
+        // 探针阶段：先攒够签名再放行
+        const int n = readFn(ctx, probeBuf + probeLen, PDL_PROBE_BYTES - probeLen);
+        if (n > 0) {
+          probeLen += (size_t)n;
+          total += (uint32_t)n;
+          last = millis();
+          gotData = true;
+          portENTER_CRITICAL(&s_mux);
+          s_st.jobBytes = total;
+          s_st.bytesReceived += (uint32_t)n;
+          portEXIT_CRITICAL(&s_mux);
+          sigDecision = sigCheck();
+        } else if (n == 0) {
+          if (probeLen == 0) {
+            sigDecision = 1;              // 空作业：走原有 EOF 路径
+          } else {
+            sigDecision = -1;             // 对端关了仍认不出 → 垃圾数据
+          }
+        } else if (n == -2) {
+          ok = false; why = "连接异常"; break;
+        }  // -1 = EAGAIN，稍后重试
+
+        if (sigDecision < 0) {
+          ok = false;
+          suppressEof = true;
+          why = "打印数据无法识别（开头无已知打印语言签名，疑似其它设备误发）";
+          FWLOGE("[gate] 拒绝作业 src=%s bytes=%u：前 %u B 无已知打印语言签名\n",
+                 s_curSrc, (unsigned)total, (unsigned)probeLen);
+          break;
+        }
+        if (sigDecision > 0 && probeLen) {
+          // 认出语言：探针字节一次性补进 ring（可能跨多个块），再恢复零拷贝
+          size_t off = 0;
+          while (off < probeLen) {
+            uint8_t *p = nullptr;
+            const size_t room = spoolWriteAcquire(probeLen - off, &p);
+            if (!room) { sysMonFeed(); vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+            memcpy(p, probeBuf + off, room);
+            s_crcIn.update(p, room);
+            s_crcInBytes += (uint32_t)room;
+            spoolWriteCommit(room);
+            off += room;
+          }
+        }
+      } else {
       uint8_t *p = nullptr;
       const size_t room = spoolWriteAcquire(NET_READ_CHUNK, &p);
       if (room > 0) {
         const int n = readFn(ctx, p, room);  // 零拷贝直写 spool，长度永不超过可用空间
         if (n > 0) {
+          s_crcIn.update(p, (size_t)n);          // 内容校验：收到什么算什么
+          s_crcInBytes += (uint32_t)n;
           spoolWriteCommit((size_t)n);
           total += (uint32_t)n;
           last = millis();
@@ -277,11 +374,22 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
           ok = false; why = "连接异常"; break;
         }  // -1 = EAGAIN，稍后重试
       }
+      }
 
       // 客户端发完数据却不主动关连接时，按「正常完成」收尾。
       // 绝不能判失败：RST 会让打印队列重发，造成整份文档重复打印。
       if (!flag(s_jobEof) && millis() - last >= CLIENT_IDLE_TIMEOUT_MS) {
         if (total == 0) { ok = false; why = "空作业超时"; break; }
+        if (PDL_SIGNATURE_GATE && sigDecision == 0) {
+          // 探针期内客户端停止发送：签名永远悬而未决。这些字节既不能送 USB
+          //（没认出语言），也不能回「接收成功」（客户端会以为打完了）。
+          ok = false;
+          suppressEof = true;
+          why = "数据流不完整（探针期内客户端停止发送）";
+          FWLOGE("[gate] 拒绝作业 src=%s bytes=%u：探针期内对端停止发送\n",
+                 s_curSrc, (unsigned)total);
+          break;
+        }
         markEof();
         setMsg("客户端长时间无新数据，按已发送完成收尾（不会重发作业）");
       }
@@ -346,6 +454,8 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
         const size_t room = spoolWriteAcquire(sizeof(kTail) - wrote, &p);
         if (room) {
           memcpy(p, kTail + wrote, room);
+          s_crcIn.update(p, room);           // 尾部也算进「收到」一侧，口径一致
+          s_crcInBytes += (uint32_t)room;
           spoolWriteCommit(room);
           wrote += room;
         } else {
@@ -367,6 +477,14 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
   setFlag(s_jobActive, false);
   requestSpoolReset();               // 作业结束：消费者在安全点清空
 
+  // 内容完整性：收到的 vs 送进 USB 的。不一致 = 传输层改了字节（乱码白纸的
+  // 直接证据）；一致 = 固件忠实透传，问题在驱动流或打印机侧。
+  FWLOGI("[crc] %s in=%08lx(%u B) out=%08lx(%u B) %s\n",
+         tag, (unsigned long)s_crcIn.value(), (unsigned)s_crcInBytes,
+         (unsigned long)s_crcOut.value(), (unsigned)s_crcOutBytes,
+         (s_crcIn.value() == s_crcOut.value() && s_crcInBytes == s_crcOutBytes)
+             ? "MATCH" : "MISMATCH !!");
+
   setFlag(s_busy, false);
   portENTER_CRITICAL(&s_mux);
   s_st.busy = false;
@@ -378,6 +496,7 @@ bool netPrintRunJob(JobReadFn readFn, void *ctx, const char *tag,
   if (!strcmp(tag, "RAW9100")) ++s_st.jobsRaw;
   else ++s_st.jobsIpp;
   strlcpy(s_st.lastTag, tag, sizeof(s_st.lastTag));
+  strlcpy(s_st.lastSrc, s_curSrc, sizeof(s_st.lastSrc));
   s_st.lastBytes = total;
   s_st.lastMs = millis() - start;
   s_st.lastOk = ok;
@@ -423,6 +542,7 @@ LastJobInfo netPrintLastJob() {
   LastJobInfo j = {};
   portENTER_CRITICAL(&s_mux);
   strlcpy(j.tag, s_st.lastTag, sizeof(j.tag));
+  strlcpy(j.src, s_st.lastSrc, sizeof(j.src));
   j.bytes = s_st.lastBytes;
   j.ms = s_st.lastMs;
   j.ok = s_st.lastOk;
@@ -454,6 +574,12 @@ NetPrintStatus netPrintStatus() {
 }
 
 bool netPrintBusy() { return flag(s_busy); }
+
+void netPrintSetJobSource(const char *ip) {
+  portENTER_CRITICAL(&s_mux);
+  strlcpy(s_curSrc, ip ? ip : "", sizeof(s_curSrc));
+  portEXIT_CRITICAL(&s_mux);
+}
 
 // 卡死时的逃生口：不需要断电重启。作业泵会在下一轮循环看到标志，
 // 走 abort（halt + flush + clear）并复位 busy。

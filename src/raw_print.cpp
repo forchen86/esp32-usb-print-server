@@ -30,7 +30,8 @@ struct RawCtx {
 };
 
 struct RawJob {
-  int fd;
+  int  fd;
+  char src[16];           // 来源 IP：乱码页归责的第一手证据
 };
 
 RawCtx        s_jobCtx;        // 队列深度 1，同一时刻只有一份作业用它
@@ -95,6 +96,7 @@ void rawJobTask(void *) {
       continue;
     }
     s_jobCtx.fd = job.fd;
+    netPrintSetJobSource(job.src);   // 归责：这一页是谁打的
     if (!waitFirstByte(job.fd, 10000)) {
       FWLOGD_LN("[raw] 连接 10s 无数据，按探测处理并关闭");
       close(job.fd);
@@ -137,13 +139,20 @@ void rawTask(void *) {
     const int r = select(s_listener + 1, &rfds, nullptr, nullptr, &tv);
     if (r <= 0) continue;
 
-    const int fd = accept(s_listener, nullptr, nullptr);
+    struct sockaddr_in sa;
+    socklen_t sl = sizeof(sa);
+    const int fd = accept(s_listener, reinterpret_cast<struct sockaddr *>(&sa), &sl);
     if (fd < 0) continue;
 
-    // 单作业并发：忙就立刻关，不排队。
+    const uint8_t *a = reinterpret_cast<const uint8_t *>(&sa.sin_addr.s_addr);
+    char src[16];
+    snprintf(src, sizeof(src), "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+
+    // 单作业并发：忙就立刻关，不排队。来源 IP 一起记录 —— 谁在往 9100 塞
+    // 作业（甚至是你自己都没意识到的手机 App），这里一目了然。
     if (netPrintBusy() || uxQueueSpacesAvailable(s_jobQ) < 1) {
       close(fd);
-      FWLOGD_LN("[raw] 已有作业在打印，直接关闭新连接（客户端会自动重试）");
+      FWLOGD("[raw] 拒绝 %s 的连接（已有作业在打印，客户端会自动重试）\n", src);
       continue;
     }
     int nodelay = 1;
@@ -152,7 +161,9 @@ void rawTask(void *) {
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     fcntl(fd, F_SETFL, O_NONBLOCK);
 
-    RawJob job = {fd};
+    FWLOGD("[raw] 作业来源 %s:%u\n", src, (unsigned)ntohs(sa.sin_port));
+    RawJob job = {fd, {0}};
+    strlcpy(job.src, src, sizeof(job.src));
     if (xQueueSend(s_jobQ, &job, 0) != pdTRUE) {
       close(fd);
       continue;

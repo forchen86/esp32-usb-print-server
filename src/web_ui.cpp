@@ -92,6 +92,9 @@ main{max-width:1160px;margin:0 auto;padding:18px 20px 44px}
 .kv>div{display:flex;justify-content:space-between;gap:12px;border-bottom:1px dashed var(--line);padding-bottom:6px;min-width:0}
 .k{color:var(--sub);flex:none}
 .v{text-align:right;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+/* 长值（URL、状态消息）：独占一整行 + 自动换行，不再截断 */
+.kv .wide{grid-column:1/-1}
+.kv .wide .v{white-space:normal;overflow-wrap:anywhere;word-break:break-all;text-align:right;line-height:1.45}
 .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.muted{color:var(--muted)}
 .meter{height:10px;background:#eef2f7;border-radius:999px;overflow:hidden;margin:2px 0 16px}
@@ -109,7 +112,7 @@ button.primary:hover{background:#1d4ed8;color:#fff}
 button.danger:hover{border-color:var(--bad);color:var(--bad)}
 input,select{font:inherit;font-size:13px;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--txt);margin-top:6px}
 label{display:block;color:var(--sub);font-size:12px;margin-top:10px}
-.msg{margin-top:12px;min-height:18px;color:var(--sub);font-size:12px}
+.msg{margin-top:12px;min-height:18px;color:var(--sub);font-size:12px;overflow-wrap:anywhere;word-break:break-all}
 .note{background:var(--soft);border-left:3px solid var(--brand);border-radius:0 9px 9px 0;padding:10px 12px;color:#1e40af;font-size:12px;margin-top:14px}
 pre{background:#0f172a;color:#e2e8f0;border-radius:9px;padding:11px 13px;overflow:auto;font-size:12px;margin:8px 0 0}
 details{margin-top:12px;font-size:12px;color:var(--sub)}
@@ -130,10 +133,10 @@ footer{text-align:center;color:var(--muted);font-size:11px;margin-top:22px;line-
     <h2>这台打印机 <span class="hint" id="idstate">识别中…</span></h2>
     <div class="kv">
       <div><span class="k">品牌</span><span class="v" id="p_make">-</span></div>
-      <div><span class="k">型号</span><span class="v" id="p_model">-</span></div>
-      <div><span class="k">完整型号</span><span class="v" id="p_des">-</span></div>
-      <div><span class="k">电脑上显示的名字</span><span class="v mono" id="p_name">-</span></div>
-      <div><span class="k">序列号</span><span class="v mono" id="p_serial">-</span></div>
+      <div class="wide"><span class="k">型号</span><span class="v" id="p_model">-</span></div>
+      <div class="wide"><span class="k">完整型号</span><span class="v" id="p_des">-</span></div>
+      <div class="wide"><span class="k">电脑上显示的名字</span><span class="v mono" id="p_name">-</span></div>
+      <div class="wide"><span class="k">序列号</span><span class="v mono" id="p_serial">-</span></div>
       <div><span class="k">USB 编号</span><span class="v mono" id="p_vid">-</span></div>
       <div><span class="k">USB 接口</span><span class="v" id="p_iface">-</span></div>
       <div><span class="k">数据通道</span><span class="v mono" id="p_ep">-</span></div>
@@ -153,7 +156,7 @@ footer{text-align:center;color:var(--muted);font-size:11px;margin-top:22px;line-
       <div><span class="k">信号强度</span><span class="v" id="rssi">-</span></div>
       <div><span class="k">路由器分配的地址</span><span class="v mono" id="staip">-</span></div>
       <div><span class="k">本机热点地址</span><span class="v mono" id="apip">-</span></div>
-      <div><span class="k">已连的 Wi-Fi</span><span class="v mono" id="ssid">-</span></div>
+      <div class="wide"><span class="k">已连的 Wi-Fi</span><span class="v mono" id="ssid">-</span></div>
       <div><span class="k">本机热点名</span><span class="v mono" id="apssid">-</span></div>
     </div>
     <label>附近搜到的 Wi-Fi<select id="netlist"><option value="">— 也可以手动填写 —</option></select></label>
@@ -171,12 +174,12 @@ footer{text-align:center;color:var(--muted);font-size:11px;margin-top:22px;line-
       <div class="port" id="port_snmp"><span class="dot"></span><b>SNMP 161</b><span class="muted" style="font-size:11px">查状态</span></div>
     </div>
     <div class="kv">
-      <div><span class="k">打印地址（IPP）</span><span class="v mono" id="ippurl">-</span></div>
+      <div class="wide"><span class="k">打印地址（IPP）</span><span class="v mono" id="ippurl">-</span></div>
       <div><span class="k">正在打印</span><span class="v" id="busy">-</span></div>
       <div><span class="k">成功 / 失败次数</span><span class="v" id="jobs">-</span></div>
       <div><span class="k">两种方式的作业数</span><span class="v" id="jobsplit">-</span></div>
       <div><span class="k">已发给打印机</span><span class="v" id="ubytes">-</span></div>
-      <div><span class="k">最近状态</span><span class="v" id="pmsg">-</span></div>
+      <div class="wide"><span class="k">最近状态</span><span class="v" id="pmsg">-</span></div>
     </div>
     <div class="bar"><button class="danger" onclick="abortJob()">中止当前作业</button></div>
     <div class="msg" id="lastjob">-</div>
@@ -200,7 +203,7 @@ footer{text-align:center;color:var(--muted);font-size:11px;margin-top:22px;line-
     <div class="kv">
       <div><span class="k">打印机是否支持</span><span class="v" id="dpxdetected">-</span></div>
       <div><span class="k">当前设置</span><span class="v" id="dpxstate">-</span></div>
-      <div><span class="k">判断依据</span><span class="v" id="dpxevidence">-</span></div>
+      <div class="wide"><span class="k">判断依据</span><span class="v" id="dpxevidence">-</span></div>
       <div><span class="k">自动补发双面指令</span><span class="v" id="pjlstate">-</span></div>
       <div><span class="k">作业结束标记</span><span class="v">只收尾，不多吐白纸</span></div>
       <div><span class="k">默认发送格式</span><span class="v mono" id="deffmt">-</span></div>
@@ -224,7 +227,7 @@ footer{text-align:center;color:var(--muted);font-size:11px;margin-top:22px;line-
       <div><span class="k">已连续运行</span><span class="v" id="uptime">-</span></div>
       <div><span class="k">剩余内存</span><span class="v" id="heap">-</span></div>
       <div><span class="k">开机次数 / 本次原因</span><span class="v mono" id="boot">-</span></div>
-      <div><span class="k">上次异常记录</span><span class="v" id="lastfault">-</span></div>
+      <div class="wide"><span class="k">上次异常记录</span><span class="v" id="lastfault">-</span></div>
       <div><span class="k">看门狗超时</span><span class="v" id="wdt">-</span></div>
     </div>
     <div class="bar"><button class="danger" onclick="reboot()">重启设备</button></div>
@@ -287,7 +290,7 @@ async function status(){
   $('jobsplit').textContent=(p.jobs_raw||0)+' / '+(p.jobs_ipp||0);
   $('ubytes').textContent=fmtBytes(p.bytes);
   $('pmsg').textContent=p.message||'-';
-  $('lastjob').textContent=lj.tag?(lj.tag+' · '+fmtBytes(lj.bytes)+' · '+(lj.ms/1000).toFixed(1)+'s · '+(lj.ok?'成功':('中止'+(lj.why?'：'+lj.why:'')))):'暂无作业';
+  $('lastjob').textContent=lj.tag?((lj.src?lj.src+' · ':'')+lj.tag+' · '+fmtBytes(lj.bytes)+' · '+(lj.ms/1000).toFixed(1)+'s · '+(lj.ok?'成功':('中止'+(lj.why?'：'+lj.why:'')))):'暂无作业';
   const cap=Number(sp.capacity)||1,used=Number(sp.used)||0;
   const pct=Math.min(100,Math.round(used*100/cap));
   $('meterfill').style.width=pct+'%';$('meterfill').classList.toggle('hi',pct>=75);
@@ -429,6 +432,7 @@ void handleStatus() {
   jAppend(o, ",\"errors\":%u", (unsigned)u.usbErrors);
   jAppend(o, ",\"message\":");
   jStr(o, u.message);
+  jAppend(o, ",\"buf_corrupt\":%lu", (unsigned long)usbPrinterBufCorrupt());
   jAppend(o, "}");
 
   // SNMP 是独立服务，指示灯必须读真实 bind 状态，不能拿打印服务状态代替
@@ -473,6 +477,8 @@ void handleStatus() {
   jAppend(o, ",\"bytes\":%lu,\"ms\":%lu,\"ok\":%s,\"aborted\":%s,\"why\":",
           (unsigned long)lj.bytes, (unsigned long)lj.ms, b2s(lj.ok), b2s(lj.aborted));
   jStr(o, lj.why);
+  jAppend(o, ",\"src\":");
+  jStr(o, lj.src);
   jAppend(o, ",\"at\":%lu}", (unsigned long)lj.atSec);
 
   jAppend(o, ",\"pending_restart\":");

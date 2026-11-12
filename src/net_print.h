@@ -37,6 +37,7 @@ struct NetPrintStatus {
   char     message[160];
   // 最近一次作业（Web 与 IPP 回执共用，避免两处各记一套）
   char     lastTag[12];
+  char     lastSrc[16];    // 最近一次作业的来源 IP
   uint32_t lastBytes;
   uint32_t lastMs;
   bool     lastOk;
@@ -48,6 +49,7 @@ struct NetPrintStatus {
 // 最近一次作业的结果（Web 与 IPP 回执共用）
 struct LastJobInfo {
   char     tag[12];        // "RAW9100" / "IPP"
+  char     src[16];        // 作业来源 IP（局域网里谁打的，一眼可见）
   uint32_t bytes;
   uint32_t ms;             // 本次作业耗时
   bool     ok;
@@ -60,6 +62,8 @@ void           netPrintBegin();
 NetPrintStatus netPrintStatus();
 LastJobInfo    netPrintLastJob();
 bool           netPrintBusy();
+// 记录当前作业来源 IP（accept 时取，RunJob 前设置）——乱码页归责的第一手证据
+void           netPrintSetJobSource(const char *ip);
 // 中止当前作业（不需要断电重启）：作业泵下一轮走 abort 并复位 busy。
 void           netPrintAbort();
 void           netPrintSetIppListening(bool on);

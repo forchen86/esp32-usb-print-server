@@ -35,6 +35,7 @@ struct XferSlot {
   volatile int    status = 0;
   volatile size_t actual = 0;
   size_t          len = 0;      // 本次提交长度（判断短包用）
+  uint32_t        crcBefore = 0;  // 提交前缓冲区校验（抓在飞期间被改写的竞态）
 };
 XferSlot s_slot[USB_XFER_SLOTS];
 uint8_t  s_submitIdx = 0;       // 下一个要提交的槽
@@ -248,6 +249,22 @@ void serviceFaultRecovery() {
 }
 
 // 回调只置标志，不做任何 RTOS 调用 —— 不依赖回调所在上下文（任务/ISR 都安全）
+// ---- DMA 缓冲「脏数据」校验 -------------------------------------------------
+// 提交前对 DMA 缓冲算一份 Adler-32，传输完成后再算一份。正常情况两份必然
+// 相同（缓冲只在 CPU 写、DMA 只读）；不一致 = 在飞期间缓冲被别的东西改写了
+// （竞态 / 越界写），这正是「偶发乱码」这类难以复现的问题最需要的一手证据。
+static uint32_t bufAdler(const uint8_t *p, size_t n) {
+  uint32_t a = 1, b = 0;
+  while (n) {
+    size_t chunk = n > 5550 ? 5550 : n;
+    n -= chunk;
+    while (chunk--) { a += *p++; b += a; }
+    a %= 65521; b %= 65521;
+  }
+  return (b << 16) | a;
+}
+static uint32_t s_bufCorrupt = 0;     // 缓冲校验不一致计数（writer 任务内递增）
+
 void xferCallback(usb_transfer_t *t) {
   XferSlot *s = static_cast<XferSlot *>(t->context);
   if (s) {
@@ -686,6 +703,8 @@ bool usbPrinterPaperEmpty() {
   return v;
 }
 
+uint32_t usbPrinterBufCorrupt() { return s_bufCorrupt; }
+
 // ---- 双缓冲乒乓流水线 ------------------------------------------------------
 // 只允许一个生产者（spool 搬运任务），因此下标推进不需要额外加锁：
 // submitIdx 单调前进，waitIdx 单调追赶，天然构成 FIFO。
@@ -720,6 +739,7 @@ bool usbPrinterSubmit(const uint8_t *data, size_t len) {
   s.t->num_bytes = (int)len;
   s.t->flags = 0;
   memcpy(s.t->data_buffer, data, len);
+  s.crcBefore = bufAdler(s.t->data_buffer, len);   // 提交前基线
   s.status = -1;
   s.actual = 0;
   s.len = len;
@@ -786,6 +806,16 @@ size_t usbPrinterWait(size_t *submitted) {
   if (!timedOut && !gone && s.done &&
       s.status == (int)USB_TRANSFER_STATUS_COMPLETED && s.actual <= want) {
     written = s.actual;
+    // DMA 在飞期间缓冲必须原封不动。校验整块 want（短包时未发送的尾部也
+    // 不应该被改），不一致立即报告并计数 —— 这是脏数据竞态的直接证据。
+    const uint32_t crcAfter = bufAdler(s.t->data_buffer, want);
+    if (crcAfter != s.crcBefore) {
+      ++s_bufCorrupt;
+      FWLOGE("[usb] 缓冲校验不一致! slot=%d want=%u before=%08lx after=%08lx (第%lu次)\n",
+             (int)s_waitIdx, (unsigned)want,
+             (unsigned long)s.crcBefore, (unsigned long)crcAfter,
+             (unsigned long)s_bufCorrupt);
+    }
   }
 
   s.inFlight = false;

@@ -25,6 +25,8 @@ UsbPrinterStatus usbPrinterStatus();
 bool             usbPrinterReady();
 // 缺纸时引擎会停，bulk OUT 永远 NAK —— 提前判断，别让客户端干等超时
 bool             usbPrinterPaperEmpty();
+// DMA 缓冲「提交前 vs 完成后」校验不一致的次数（>0 = 存在改写竞态，必须排查）
+uint32_t         usbPrinterBufCorrupt();
 
 // ---- 双缓冲乒乓流水线 ------------------------------------------------------
 // submit 只把数据拷进 DMA 缓冲并排队，立刻返回；wait 等「最早提交的那块」完成。

@@ -608,6 +608,24 @@ void fillPrinterAttrs(IppBuilder &b, uint32_t) {
   fillPrinterAttrsImpl(b, cfgDuplexEnabled());
 }
 
+// 打印作业进行中的属性查询用「瘦身应答」：只回状态轮询真正需要的 6 个字段
+// （几百字节），不构造 8KB 全量属性包 —— 既隔离了轮询与作业的资源竞争，
+// 又不至于让 Windows / AirPrint 的状态监视把打印机当成离线。
+void fillMinimalPrinterAttrs(IppBuilder &b, uint32_t) {
+  char uri[64];
+  snprintf(uri, sizeof(uri), "ipp://%s.local:631/ipp/print", FW_HOSTNAME);
+  const uint8_t pstate = ippPrinterState();
+  b.strAttr(VT_URI,      "printer-uri-supported", uri);
+  b.strAttr(VT_NAME,     "printer-name", printerIdName());
+  b.enumAttr("printer-state", pstate);
+  b.strAttr(VT_KEYWORD,  "printer-state-reasons",
+            pstate == 5 ? (usbPrinterPaperEmpty() ? "media-empty" : "marker-supply-low")
+                        : "none");
+  b.boolAttr("printer-is-accepting-jobs", usbPrinterReady() && !netPrintBusy());
+  b.intAttr("queued-job-count", netPrintBusy() ? 1 : 0);
+  b.intAttr("printer-up-time", (int32_t)(millis() / 1000));
+}
+
 // fillJobAttrs 是函数指针，拿不到本次请求的上下文；IPP 631 是单连接串行处理，
 // 用文件作用域的「本次回执参数」传递即可（写与读都发生在 sendIpp 前后的同一任务）。
 struct JobReplyInfo {
@@ -708,9 +726,65 @@ struct IppJobReq {
   uint16_t version;
   uint32_t requestId;
   bool     substitute;      // 双面被降级（投递时的判定，避免中途改开关影响回执）
+  char     src[16];         // 来源 IP：乱码页归责的第一手证据
 };
 
 IppCtx        s_jobCtx;     // 队列深度 1，同一时刻只可能有一份作业用它
+
+// ---- 来源追溯 + 属性查询限流 ------------------------------------------------
+// s_connSrc / s_connIp 只在 ippTask 的 accept 里写、handleConnection 里读
+// （单连接串行），不需要加锁。
+char     s_connSrc[16] = "";   // 当前连接来源 IP（字符串）
+uint32_t s_connIp   = 0;       // 当前连接来源 IP（网络序 raw）
+
+// 同一 IP 的属性查询最小间隔：局域网里有的设备（手机打印 App、其它电脑的
+// 状态监视）每 1~2 秒就拉一次 Get-Printer-Attributes，每次都要花 8KB 缓冲
+// 构造完整属性包。限流后超频查询直接回 HTTP 503 + Retry-After，不构造属性。
+#define IPP_ATTR_MIN_INTERVAL_MS 3000
+struct AttrClient {
+  uint32_t ip;                // 网络序
+  uint32_t lastMs;            // 上次放行的时刻
+};
+AttrClient    s_attrClients[8];
+uint32_t      s_attrBlocked = 0;
+uint32_t      s_attrOldest = 0;    // 淘汰指针（简单轮转替换）
+
+bool attrQueryAllowed(uint32_t ipNet) {
+  const uint32_t now = millis();
+  int slot = -1;
+  for (int i = 0; i < (int)(sizeof(s_attrClients) / sizeof(s_attrClients[0])); ++i) {
+    if (s_attrClients[i].ip == ipNet) { slot = i; break; }
+  }
+  if (slot < 0) {
+    // 新 IP：抢占最旧的槽
+    slot = (int)(s_attrOldest % (sizeof(s_attrClients) / sizeof(s_attrClients[0])));
+    ++s_attrOldest;
+    s_attrClients[slot].ip = ipNet;
+    s_attrClients[slot].lastMs = 0;
+  }
+  if (s_attrClients[slot].lastMs && now - s_attrClients[slot].lastMs < IPP_ATTR_MIN_INTERVAL_MS) {
+    ++s_attrBlocked;
+    return false;
+  }
+  s_attrClients[slot].lastMs = now;
+  return true;
+}
+
+// 限流响应：HTTP 503 + Retry-After，客户端（轮询器）会按此退避
+void sendThrottled(int fd) {
+  static const char body[] = "attr query rate limited";
+  char hdr[192];
+  const int h = snprintf(hdr, sizeof(hdr),
+      "HTTP/1.1 503 Service Unavailable\r\n"
+      "Server: USB-Print-Server\r\n"
+      "Content-Type: text/plain\r\n"
+      "Content-Length: %u\r\n"
+      "Retry-After: %d\r\n"
+      "Connection: close\r\n\r\n",
+      (unsigned)(sizeof(body) - 1), (int)(IPP_ATTR_MIN_INTERVAL_MS / 1000));
+  if (h > 0) sendAll(fd, (const uint8_t *)hdr, (size_t)h);
+  sendAll(fd, (const uint8_t *)body, sizeof(body) - 1);
+}
 QueueHandle_t s_jobQ = nullptr;
 
 void ippJobTask(void *) {
@@ -725,6 +799,7 @@ void ippJobTask(void *) {
                          (uint16_t)(req.substitute ? IPP_OK_SUBSTITUTED : IPP_OK),
                          req.substitute, ""};
     strlcpy(reply.requested, s_jobCtx.sides, sizeof(reply.requested));
+    netPrintSetJobSource(req.src);   // 归责：这一页是谁打的
 
     // 回执字段跨请求复用，每次作业前先复位，避免上一份的 aborted 状态漏下来
     setJobReply(false, 5, "none", "one-sided", s_jobCtx.sides);
@@ -816,7 +891,8 @@ bool handlePrintJob(int fd, IppCtx &c) {
 
   s_jobCtx = c;                 // 拷贝到静态实例：队列深度 1，不会互相踩
   s_jobCtx.fd = fd;
-  IppJobReq req = {fd, c.version, c.requestId, substitute};
+  IppJobReq req = {fd, c.version, c.requestId, substitute, {0}};
+  strlcpy(req.src, s_connSrc, sizeof(req.src));
   if (xQueueSend(s_jobQ, &req, 0) != pdTRUE) {   // 极小概率竞态：仍按忙处理
     sendIpp(fd, c.version, IPP_ERR_BUSY, c.requestId, nullptr,
             "设备正忙，请稍后重试", "Retry-After: 30\r\n");
@@ -912,6 +988,19 @@ void handleConnection(int fd) {
   bool fdTaken = false;
   switch (c.operation) {
     case IPP_GET_PRINTER_ATTRIBUTES:
+      // 同 IP 限流：超频的属性查询不构造 8KB 属性包，直接 503 + Retry-After
+      if (!attrQueryAllowed(s_connIp)) {
+        FWLOGD("[ipp] 属性查询限流 ip=%s（累计 %lu 次）\n",
+               s_connSrc, (unsigned long)s_attrBlocked);
+        sendThrottled(fd);
+        break;
+      }
+      // 与打印作业隔离：作业进行中只回瘦身应答（几百字节、6 个核心字段），
+      // 不构造全量属性包 —— 轮询设备拿到的状态仍是实时的。
+      if (netPrintBusy()) {
+        sendIpp(fd, c.version, IPP_OK, c.requestId, fillMinimalPrinterAttrs);
+        break;
+      }
       sendIpp(fd, c.version, IPP_OK, c.requestId, fillPrinterAttrs);
       break;
 
@@ -998,8 +1087,18 @@ void ippTask(void *) {
     tv.tv_usec = 200000;
     const int r = select(s_listener + 1, &rfds, nullptr, nullptr, &tv);
     if (r <= 0) continue;                 // 超时 / EINTR：回去喂狗再等
-    const int fd = accept(s_listener, nullptr, nullptr);
-    if (fd >= 0) handleConnection(fd);    // 单连接串行，杜绝两作业交错进 USB
+    struct sockaddr_in sa;
+    socklen_t sl = sizeof(sa);
+    const int fd = accept(s_listener, reinterpret_cast<struct sockaddr *>(&sa), &sl);
+    if (fd >= 0) {
+      // 记录来源：局域网里若有设备每 2s 轮询属性（手机打印 App / 其它电脑），
+      // 串口一行就能定位是谁 —— 排查「轮询与打印并发」类问题必需。
+      const uint8_t *a = reinterpret_cast<const uint8_t *>(&sa.sin_addr.s_addr);
+      snprintf(s_connSrc, sizeof(s_connSrc), "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+      s_connIp = sa.sin_addr.s_addr;   // 限流用（网络序 raw）
+      FWLOGD("[ipp] conn from %s:%u\n", s_connSrc, (unsigned)ntohs(sa.sin_port));
+      handleConnection(fd);    // 单连接串行，杜绝两作业交错进 USB
+    }
   }
 }
 }  // namespace
