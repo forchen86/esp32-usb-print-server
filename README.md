@@ -77,34 +77,11 @@
 
 > 下文各历史章节（第一~十一节）记录了以 HP M203d 为样机的调参、排错与验证过程，其中的机型专属数字与结论仅供背景参考；**现行架构与能力以本节为准**。
 
-### RAW 9100 上的双面打印（重要）
+### RAW 9100 上的双面打印
 
-RAW 9100 只有一条裸字节流，**没有 IPP 那样的 `sides` 属性协商**，所以固件在这一侧**刻意不做任何注入**：双面指令必须由客户端驱动写进它生成的打印数据流（PJL `@PJL SET DUPLEX=ON` / `@PJL SET BINDING=LONGEDGE`，或 PCL `&l1S` 等），固件原样透传。自动识别出的双面能力只影响 IPP `sides-supported`、Bonjour `duplex=T`、URF `DM3`、SNMP 与 Web 显示，**不会改变 RAW 字节流**。
+RAW 只有一条裸字节流，没有 IPP 那样的属性协商，固件在这条通路**不做任何注入**——双面指令由客户端驱动写进数据流，固件原样转发；页面识别出的双面能力只影响 IPP 属性与状态显示，不改变 RAW 字节流。
 
-Windows 下开启双面（以 HP LaserJet Pro M203d 为例）：
-
-1. 添加打印机 →「使用 TCP/IP 地址或主机名添加」→ 填设备 IP（如 `192.168.10.43`），**取消勾选**「查询打印机并自动选择要使用的驱动程序」；
-2. 端口设置：协议 **RAW**、端口号 **9100**、**关闭「启用 SNMP 状态」**（本固件 SNMP 是只读简化实现，开着容易让 Windows 误判离线）；
-3. 驱动必须选 **HP 原厂 PCL6 / PCL5 驱动**（如 `HP LaserJet Pro M203-M206 PCL-6`），不要用 `Microsoft IPP Class Driver` 或 `Generic / Text Only` —— 这些驱动不会生成双面指令；
-4. 打印机属性 → **设备设置 → 可安装选项 → 双面打印单元：已安装**。固件没有双向状态通道，驱动无法自动探测，必须手动声明，否则双面选项是灰的；
-5. 打印首选项选「双面打印 / 长边装订」，打印双页文档验证。
-
-排查：若仍只出单面，用 Wireshark 抓 9100 数据流搜 `DUPLEX`；搜不到说明驱动没发指令，问题在客户端而不是固件。
-
-- **两条打印通路并存**：`9100 RAW`（默认，Windows「TCP/IP 端口 + Raw」直连，close 即作业结束）+ `631 IPP`（IPP Everywhere / AirPrint 兼容机型）。两个监听任务分开，共用同一个作业泵
-- **自动识别机型**：1284 Device ID → 厂商/型号/序列号/命令集/PDL，IPP、mDNS、SNMP、Web 四处同源
-- **自动双面**：从 1284 `CAP/CMD/DUPLEX` 与型号后缀 `d` 识别双面单元，三态策略（自动 / 强制开 / 强制关）；IPP 的 `sides` 作业属性会在文档前翻译成 PJL `SET DUPLEX=ON / SET BINDING=…` 注入，解决「选了双面却出单面纸」；对不懂 PJL 的标签机自动禁用，RAW 通路不注入
-- **单作业并发**：第二个连接不再排队 —— IPP 直接回 `server-error-busy` + `Retry-After: 30`，RAW 直接关闭连接让客户端重试，backlog 里不堆内存
-- **Web 界面**：设备身份卡片 + 状态徽章 + 三通路指示 + 环形缓冲水位条 + 上次作业 + Wi-Fi 配网 + 双面开关 + 中止/重启
-- **AP 只在需要时开**：STA 连续在线 60s 自动关闭热点（省电、降空口干扰）；STA 掉线满 3 分钟自动重开，仍可重新配网
-- **被动 mDNS**：自己实现 5353 responder，**只应答查询、不做任何周期 announce**（ESPmDNS 的 TTL 固定 120s，每 60s 一轮广播）。`_ipp._tcp` / `_pdl-datastream._tcp` / `_http._tcp` 全支持
-- **SNMP 161 状态**：只读 v1/v2c GET/GETNEXT，`hrDeviceStatus` / `hrPrinterStatus` 等取值统一来自 **IPP 的 printer-state**，与 Web、IPP 三处口径一致
-- **Wi-Fi 断线重连**：关闭自动重连，自己实现 2s→4s→8s→…→30s 指数退避；长期失败自动重启自救
-- **任务看门狗**：硬件 TWDT 监控全部自建任务，任一任务卡死 15s 即 panic 重启
-- **双核分工**：Wi-Fi/LwIP + 9100 + 631 固定在核 0；USB Host / 缓冲搬运 / Web / 监控固定在核 1，互不抢核
-- **256 KB 环形缓冲 + 双水位背压**：4 × 64 KB 固定块池（PSRAM），运行期零 malloc/free；75% 停收、25% 复收，背压靠**停止 recv 让 TCP 窗口自己收缩**，不丢数据
-- **USB 16 KB 双缓冲乒乓**：两个 transfer 轮转，一个在飞时另一个已排队；短包即判失败并清端点，绝不把错位数据继续喂给打印机
-- **作业收尾**：正常结束**只补 `UEL`（ESC%-12345X）**，防止下一页与前一份的格式残留粘在一起；v1.4.4 起去掉 `FF(0x0C)` —— UEL 后页缓冲已空，再送 FF 会强制走纸吐出一张空白页（「每次打印都多一张白纸」的根因）。异常中止走 `abort`（halt + flush + clear）并回报 `job-state=aborted(8)`
+要点：驱动须用打印机**原厂 PCL / PS**（`Generic / Text Only`、`Microsoft IPP Class Driver` 都不会发双面指令）；装好后到「打印机属性 → 设备设置 → 可安装选项」把**双面打印单元**设为**已安装**（固件无双向通道，驱动探测不到，不声明则双面选项是灰的）。若仍只出单面，抓 9100 数据流搜 `DUPLEX`——搜不到就是驱动没发指令，问题在客户端不在固件。
 
 ---
 
@@ -193,32 +170,8 @@ esptool.py --chip esp32s3 --port COM7 --baud 460800 write-flash 0x0 firmware/rel
 esptool.py --chip esp32s3 --port COM7 --baud 460800 write-flash 0x10000 firmware/release/firmware.bin
 ```
 
-### 烧录成功的标志
+串口（115200）出现 `[usb] 打印机就绪 VID:...` 即 USB 枚举成功。
 
-串口（115200）应看到（v1.5.0 release 实测，共 15 行）：
-
-```
-==============================================
- USB Print Server v1.5.0
- Arduino-ESP32 3.3.0 / ESP32-S3 USB Host
-==============================================
-[sysmon] TWDT 15s, boot #67, reset=POWERON
-[ring] 4 x 65536 B = 262144 B in PSRAM, left 8113708 B for Wi-Fi/LwIP
-[cfg] 双面模式=自动 PJL注入=开（自动识别要等 USB 枚举完成后生效）
-[wifi] AP PrintSrv-560FB0 / 192.168.4.1  (password: <open>)
-[mdns] 被动应答已启动（_ipp._tcp.local / _pdl-datastream._tcp.local / _http._tcp.local，不主动广播）
-[web] UI ready on port 80 (AP + LAN)
-[ipp] IPP 打印服务已监听 TCP 631 /ipp/print
-[raw] RAW 打印服务已监听 TCP 9100（close = 作业结束）
-[snmp] 状态代理已监听 UDP 161（community=public，只读）
-[usb] 打印机就绪 VID:03F0 PID:632A 接口0 OUT:0x01 IN:0x81
-[id] 自动识别：HP / HP LaserJet M203-M206 / CMD=PJL,PML,PCLXL,URP,PCL,PDF,POSTSCRIPT
-[id] 发布名称：HP-LaserJet-M203d / HP LaserJet M203d
-[id] 双面=是（型号以 d 结尾，通常代表双面机型（DES）） URF=1 PJL=1
-[wifi] connected, IP=192.168.10.43, RSSI=-68
-```
-
-`[usb] 打印机就绪 VID:03F0 PID:632A` 这行出现，说明 USB Host 枚举与接口占用都成功了。
 ### 已附编译好的固件（可直接烧）
 
 | 文件 | 说明 |
