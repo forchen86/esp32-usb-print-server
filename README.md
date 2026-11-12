@@ -8,7 +8,9 @@
 · `merged.bin` 整片烧 `0x0`（含 bootloader/分区表）
 · `firmware.bin` 只升级写 `0x10000`（保留 Wi-Fi 与双面配置）
 
-把**任意符合 USB Printer Class 的打印机**变成 **9100 RAW + IPP 631 双通路**网络打印机。固件只拆协议封装、把文档数据流式送进打印机接口的 Bulk OUT 端点：不解析、不渲染、**不做任何格式转换**、不落盘，只用一块 256 KB 环形缓冲做收发解耦。
+把**任意 USB 接口的打印机**变成 **Wi-Fi 无线打印机**，电脑、手机都能打印。它提供两种接入方式：**RAW 9100**（最通用）和 **IPP 631**（免驱，iPhone / Mac 直接用）。
+
+固件只做一件事：把打印数据**原封不动**转给打印机——不改格式、不渲染、不存盘。中间用一块 256 KB 缓冲区把「网络接收」和「USB 发送」错开，两边快慢互不影响。
 
 ```
    电脑 / 手机                     ESP32-S3                       USB 打印机
@@ -25,14 +27,14 @@
 
 | 项 | 支持情况 |
 |---|---|
-| USB 接口类 | **USB Printer Class**：`bInterfaceClass=0x07`、`bInterfaceSubClass=0x01`，协议 1（单向）或 2（双向），至少一个 Bulk OUT 端点 |
+| USB 接口类 | 标准的「USB 打印机类」设备——绝大多数打印机的 USB 口都符合 |
 | USB 速率 | Full Speed / Low Speed（ESP32-S3 USB-OTG 硬件上限，Hi-Speed 设备会降速协商到 FS） |
-| 打印语言 | **透传，与语言无关**：PCL5/PCL6/PCLXL/PCLm、PostScript、PDF、URF、PWG Raster、ESC/POS、ZPL、TSPL 等——只要客户端生成的是打印机自己能解释的字节流 |
+| 打印语言 | **来什么转什么**：PCL、PostScript、PDF、URF、ESC/POS、ZPL 等，一律原样转发——只要电脑发的数据是打印机自己能懂的 |
 | 作业来源 | `9100 RAW`（一个 TCP 连接 = 一份作业）、`631 IPP Print-Job`、`/api/abort` 中止 |
-| 能力声明 | 从 1284 `CMD` 推导 MIME 列表；只有设备声明 URF 才发布 AirPrint 的 URF/PWG 能力，绝不向只支持 PCL 的机器谎报 raster |
-| 状态 | `GET_PORT_STATUS` 轮询缺纸 / 选中状态，映射到 IPP `printer-state`、SNMP、Web；缺纸时直接拒绝作业，不再卡到超时 |
-| 自动双面 | 从 1284 `CAP/CMD/DUPLEX` 与 `MDL`/`DES` 型号后缀 `d/dw/dn` 识别双面单元；IPP 侧 `sides` → PJL 作业头注入；识别不准可用「强制开/关」覆盖。**RAW 9100 不注入，双面由客户端驱动负责**，见下节 |
-| 并发 | 单作业串行；第二个连接 IPP 回 `busy + Retry-After`，RAW 直接关闭 |
+| 能力声明 | 打印机支持什么格式就对外说什么，绝不虚报——避免客户端发来打印机看不懂的数据 |
+| 状态 | 每 2 秒问一次打印机「缺纸吗」：网页直接显示，缺纸时拒绝打印作业，不会傻等超时 |
+| 自动双面 | 自动识别打印机有没有双面单元（识别不准可手动强制开/关）；电脑选了双面后，固件会替它补一条打印机认得的双面指令。9100 端口不补——由电脑驱动自己发，见下节 |
+| 并发 | 一次只打一份；第二份会被直接拒绝——刻意的取舍，简单且不会出错 |
 | 已实机验证 | HP LaserJet Pro M203d（`03F0:632A`） |
 
 **不支持 / 明确边界**：
@@ -92,16 +94,16 @@ RAW 只有一条裸字节流，没有 IPP 那样的属性协商，固件在这�
 |---|---|---|---|
 | **ESP32-S3 N16R8**（推荐、默认） | `esp32-s3-devkitc1-n16r8` | 8 MB OPI | ✅ 完整支持；本项目就是在该板 + HP M203d 上实测的 |
 | ESP32-S3 N8R8 | `esp32-s3-devkitc1-n8r8` | 8 MB OPI | ✅ 只改 `board` 一行即可，Flash 尺寸/分区表随之切换 |
-| 其他 ESP32-S3 板（含 N8R2 / 无 PSRAM） | `esp32-s3-devkitc-1` | 2 MB 或无 | ⚠️ 能跑。spool 会按实测可用内存自动降档（PSRAM 256 KB → 内部 RAM 128~16 KB），只影响大图作业的缓冲余量，不影响功能 |
+| 其他 ESP32-S3 板（含 N8R2 / 无 PSRAM） | `esp32-s3-devkitc-1` | 2 MB 或无 | ⚠️ 能用。缓冲区会自动缩小（内存不够时从 256 KB 一路降到 16 KB），只影响大文件打印的顺畅度，不影响功能 |
 | ESP32-S3-Zero / SuperMini 等小板 | 视板而定 | 视板而定 | ⚠️ 多数要**先短接背面的 OTG 焊桥**，否则 USB Host 永远枚举不到打印机 |
 | ESP32-S2 系列 | — | 通常 2 MB | ❌ 不支持：代码按双核分工实现，S2 是单核 |
 | ESP32 经典款（WROOM-32 / WROVER） | — | — | ❌ 不支持：没有 USB Host 控制器 |
 | ESP32-C3 / C6 | — | — | ❌ 不支持：单核 + 无 USB Host |
 | ESP32-P4 | — | — | ❌ 未适配（USB Host 与 PSRAM 配置都不同） |
 
-**为什么必须双核**：`net_print.cpp` / `usb_printer.cpp` 用 `xTaskCreatePinnedToCore(..., CORE_NET=0 / CORE_USB=1)` 把 Wi-Fi·LwIP 与 USB 传输分到两个核，避免互相抢占导致吞吐抖动。单核芯片上这些调用会失败或退化，所以 S2 / C3 不在支持范围。
+**为什么必须双核**：固件把「网络收发」和「USB 传输」分到两个核同时跑，互不拖累。单核芯片（S2 / C3）跑不了这套分工，所以不支持。
 
-**换板只改一行**：`platformio.ini` 里 `[env]` 段的 `board`。Flash 尺寸、分区表、PSRAM 库变体会一起切换，源码不用动。spool 容量在 `src/config.h` 按编译期宏算，运行期再按实际可用 PSRAM 逐档退让。
+**换板只改一行**：`platformio.ini` 里的 `board`。Flash 大小、分区表会自动跟着换，源码不用动；缓冲区大小在运行时按实际内存自动调整。
 
 ### 接线、供电与常见坑
 
@@ -125,9 +127,9 @@ RAW 只有一条裸字节流，没有 IPP 那样的属性协商，固件在这�
 | 环境 | 命令 | 串口日志 | 用途 |
 |---|---|---|---|
 | **release**（默认） | `pio run -e release` | 只留事件与异常，启动约 1.4 KB / 15 行 | 日常使用 |
-| **debug** | `pio run -e debug` | 全量观测点：逐请求、逐作业、轮询、内存快照 | 排障 / 验收 |
+| **debug** | `pio run -e debug` | 逐条打印请求、作业进度、内存状态 | 排查问题 |
 
-release 下 `FWLOGD(...)` 由编译器整体消除（`do { if (false) ... } while (0)`），参数不求值、日志字符串不进 Flash；`FWLOGI`（事件）与 `FWLOGE`（异常）两版都保留，正式版仍有最基本的可运维性。
+两个版本的代码完全一样，只差日志多少：**正式版**删掉了所有调试输出（体积更小、串口清爽），保留启动信息、连接状态和出错提示；**调试版**逐条打印收到的请求、作业进度和内存状态，专门用来排查问题。
 
 ```bash
 bash scripts/build.sh            # 两套都出（Windows: scripts\build.bat）
@@ -141,6 +143,8 @@ Windows 用户**请用 PowerShell 或 CMD 执行首次构建**，不要从 Git B
 
 ### 烧录
 
+> 示例里的 `COM11` 请换成**你本机实际连接的串口**：Windows 在「设备管理器 → 端口(COM 和 LPT)」里看；不确定就用 `pio device list`，它会列出当前所有可用串口。
+
 ```bash
 bash scripts/flash.sh COM11 release              # 整片烧录（含 bootloader / 分区表）
 APP_ONLY=1 bash scripts/flash.sh COM11 release   # 只写 app 分区，保留 Wi-Fi / 双面配置
@@ -153,16 +157,16 @@ Windows：`scripts\flash.bat COM11 release`；只升级 app 时先 `set APP_ONLY
 ### 用 PlatformIO 直烧
 
 ```bash
-pio run -t upload --upload-port COM7      # Windows
-pio run -t upload --upload-port /dev/ttyUSB0
-pio device monitor -b 115200
+pio device list                           # 不确定串口号？先列出本机所有可用串口
+pio run -t upload --upload-port COM7      # 串口号按上一条的实际结果填
+pio device monitor -b 115200              # 打开串口监视器看日志
 ```
 
 ### 用 esptool 手动烧
 
 ```bash
 # 整片（推荐）：bootloader + 分区表 + app 一次写完
-esptool.py --chip esp32s3 --port COM7 --baud 460800 write-flash 0x0 firmware/release/merged.bin
+esptool.py --chip esp32s3 --port COM7 --baud 460800 write-flash 0x0 firmware/release/merged.bin   # --port 按本机实际串口填
 
 # 或只升级固件（保留 Wi-Fi / 双面配置）
 esptool.py --chip esp32s3 --port COM7 --baud 460800 write-flash 0x10000 firmware/release/firmware.bin
@@ -217,7 +221,7 @@ esptool.py --chip esp32s3 --port COM7 --baud 460800 write-flash 0x10000 firmware
 | 7 | 装完 → 打印机属性 → 设备设置 → 可安装选项 → **双面打印单元：已安装** |
 | 8 | 打印首选项 → 双面打印（长边装订）→ 打一份双页文档验证 |
 
-为什么强调第 3 / 5 步：在「TCP/IP Device」模式下 Windows 会尝试用 SNMP 问设备状态，而本机的 SNMP 是**只读简化实现**（只答少数 OID），问不到就可能把打印机标成「离线」。选 Generic Network Card 或关掉「启用 SNMP 状态」就绕开了。
+为什么强调第 3 / 5 步：Windows 在「TCP/IP Device」模式下会去查询打印机的在线状态，而本机提供的查询服务很简化、答不上来，就可能被 Windows 标成「离线」。选 Generic Network Card 或关掉这个查询就绕开了。
 
 ### Windows：IPP 631（免驱）
 
